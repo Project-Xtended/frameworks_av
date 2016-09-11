@@ -528,7 +528,6 @@ static void dataCallbackTimestampBatch(int32_t, const std::vector<HandleTimestam
         void*) {
     /* Empty */
 }
-
 status_t CameraHardwareInterfaceFlashControl::connectCameraDevice(
         const String8& cameraId) {
     sp<CameraHardwareInterface> device =
