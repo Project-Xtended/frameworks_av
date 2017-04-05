@@ -434,6 +434,7 @@ DeviceVector Engine::getDevicesForStrategyInt(legacy_strategy strategy,
             devices2 = availableOutputDevices.getDevicesFromType(AUDIO_DEVICE_OUT_AUX_DIGITAL);
         }
         if ((devices2.isEmpty()) &&
+                (strategy != STRATEGY_SONIFICATION) &&
                 (getForceUse(AUDIO_POLICY_FORCE_FOR_DOCK) == AUDIO_POLICY_FORCE_ANALOG_DOCK)) {
             devices2 = availableOutputDevices.getDevicesFromType(
                     AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET);
