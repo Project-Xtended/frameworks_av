@@ -43,7 +43,6 @@ bool IOProfile::isCompatibleProfile(audio_devices_t device,
             getType() == AUDIO_PORT_TYPE_MIX && getRole() == AUDIO_PORT_ROLE_SINK;
     ALOG_ASSERT(isPlaybackThread != isRecordThread);
 
-
     if (device != AUDIO_DEVICE_NONE) {
         // just check types if multiple devices are selected
         if (popcount(device & ~AUDIO_DEVICE_BIT_IN) > 1) {
@@ -55,9 +54,10 @@ bool IOProfile::isCompatibleProfile(audio_devices_t device,
         }
     }
 
-    if (!audio_is_valid_format(format) ||
+    if (!(audio_is_valid_format(format) || (format == AUDIO_FORMAT_AAC_LATM_LC || format == AUDIO_FORMAT_APTX))||
             (isPlaybackThread && (samplingRate == 0 || !audio_is_output_channel(channelMask))) ||
             (isRecordThread && (!audio_is_input_channel(channelMask)))) {
+         ALOGE("Invalid audio format");
          return false;
     }
 
