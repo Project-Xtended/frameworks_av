@@ -78,7 +78,8 @@ enum {
     SET_AUDIO_PORT_CALLBACK_ENABLED,
     SET_MASTER_MONO,
     GET_MASTER_MONO,
-    GET_STREAM_VOLUME_DB
+    GET_STREAM_VOLUME_DB,
+    LIST_AUDIO_SESSIONS
 };
 
 #define MAX_ITEMS_PER_LIST 1024
@@ -842,6 +843,29 @@ public:
         }
         return reply.readFloat();
     }
+
+    virtual status_t listAudioSessions(audio_stream_type_t streams,
+                                       Vector< sp<AudioSessionInfo>> &sessions)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioPolicyService::getInterfaceDescriptor());
+        data.writeInt32(streams);
+        status_t status = remote()->transact(LIST_AUDIO_SESSIONS, data, &reply);
+        if (status != NO_ERROR) {
+            return status;
+        }
+
+        status = reply.readInt32();
+        if (status == NO_ERROR) {
+            size_t size = (size_t)reply.readUint32();
+            for (size_t i = 0; i < size && reply.dataAvail() > 0; i++) {
+                sp<AudioSessionInfo> info = new AudioSessionInfo();
+                info->readFromParcel(reply);
+                sessions.push_back(info);
+            }
+        }
+        return status;
+    }
 };
 
 IMPLEMENT_META_INTERFACE(AudioPolicyService, "android.media.IAudioPolicyService");
@@ -960,6 +984,7 @@ status_t BnAudioPolicyService::onTransact(
             bool hasAttributes = data.readInt32() != 0;
             if (hasAttributes) {
                 data.read(&attr, sizeof(audio_attributes_t));
+                sanetizeAudioAttributes(&attr);
             }
             audio_session_t session = (audio_session_t)data.readInt32();
             audio_stream_type_t stream = AUDIO_STREAM_DEFAULT;
@@ -1025,6 +1050,7 @@ status_t BnAudioPolicyService::onTransact(
             CHECK_INTERFACE(IAudioPolicyService, data, reply);
             audio_attributes_t attr;
             data.read(&attr, sizeof(audio_attributes_t));
+            sanetizeAudioAttributes(&attr);
             audio_io_handle_t input = (audio_io_handle_t)data.readInt32();
             audio_session_t session = (audio_session_t)data.readInt32();
             pid_t pid = (pid_t)data.readInt32();
@@ -1342,6 +1368,23 @@ status_t BnAudioPolicyService::onTransact(
             return NO_ERROR;
         } break;
 
+        case LIST_AUDIO_SESSIONS: {
+            CHECK_INTERFACE(IAudioPolicyService, data, reply);
+            audio_stream_type_t streams = (audio_stream_type_t)data.readInt32();
+
+            Vector< sp<AudioSessionInfo>> sessions;
+            status_t status = listAudioSessions(streams, sessions);
+
+            reply->writeInt32(status);
+            if (status == NO_ERROR) {
+                reply->writeUint32(static_cast<uint32_t>(sessions.size()));
+                for (size_t i = 0; i < sessions.size(); i++) {
+                    sessions[i]->writeToParcel(reply);
+                }
+            }
+            return NO_ERROR;
+        }
+
         case ACQUIRE_SOUNDTRIGGER_SESSION: {
             CHECK_INTERFACE(IAudioPolicyService, data, reply);
             sp<IAudioPolicyServiceClient> client = interface_cast<IAudioPolicyServiceClient>(
@@ -1400,6 +1443,7 @@ status_t BnAudioPolicyService::onTransact(
             data.read(&source, sizeof(struct audio_port_config));
             audio_attributes_t attributes;
             data.read(&attributes, sizeof(audio_attributes_t));
+            sanetizeAudioAttributes(&attributes);
             audio_patch_handle_t handle = AUDIO_PATCH_HANDLE_NONE;
             status_t status = startAudioSource(&source, &attributes, &handle);
             reply->writeInt32(status);
@@ -1448,6 +1492,15 @@ status_t BnAudioPolicyService::onTransact(
         default:
             return BBinder::onTransact(code, data, reply, flags);
     }
+}
+
+void BnAudioPolicyService::sanetizeAudioAttributes(audio_attributes_t* attr)
+{
+    const size_t tagsMaxSize = AUDIO_ATTRIBUTES_TAGS_MAX_SIZE;
+    if (strnlen(attr->tags, tagsMaxSize) >= tagsMaxSize) {
+        android_errorWriteLog(0x534e4554, "68953950"); // SafetyNet logging
+    }
+    attr->tags[tagsMaxSize - 1] = '\0';
 }
 
 // ----------------------------------------------------------------------------
