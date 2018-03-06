@@ -74,7 +74,7 @@ cc_library_shared {
     ],
 
     product_variables: {
-        validus: {
+        gzosp: {
             uses_generic_camera_parameter_library: {
                 srcs: [
                     "CameraParameters.cpp",
