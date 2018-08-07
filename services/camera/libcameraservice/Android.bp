@@ -19,8 +19,15 @@
 cc_library_shared {
     name: "libcameraservice",
 
-    // Camera service source
+    product_variables: {
+        xtended: {
+            target_camera_needs_client_info: {
+                cflags: ["-DTARGET_NEEDS_CLIENT_INFO"],
+            },
+        },
+    },
 
+    // Camera service source
     srcs: [
         "CameraService.cpp",
         "CameraFlashlight.cpp",
