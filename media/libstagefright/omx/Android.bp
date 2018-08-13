@@ -72,6 +72,14 @@ cc_library_shared {
         "-Wno-documentation",
     ],
 
+   product_variables: {
+        xtended: {
+            needs_legacy_camera_hal1_dyn_native_handle: {
+                cppflags: ["-DNEEDS_LEGACY_CAMERA_HAL1_DYN_NATIVE_HANDLE"],
+            },
+        },
+    },
+
     sanitize: {
         misc_undefined: [
             "signed-integer-overflow",
