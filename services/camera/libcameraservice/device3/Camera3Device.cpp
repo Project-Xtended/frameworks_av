@@ -253,6 +253,11 @@ status_t Camera3Device::initializeCommonLocked() {
     mTimestampOffset = getMonoToBoottimeOffset();
 #endif
 
+#ifdef TARGET_CAMERA_BOOTTIME_TIMESTAMP
+    // Always calculate the offset if requested
+    mTimestampOffset = getMonoToBoottimeOffset();
+#endif
+
     // Will the HAL be sending in early partial result metadata?
     camera_metadata_entry partialResultsCount =
             mDeviceInfo.find(ANDROID_REQUEST_PARTIAL_RESULT_COUNT);
