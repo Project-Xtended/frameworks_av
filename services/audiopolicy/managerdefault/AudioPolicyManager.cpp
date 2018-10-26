@@ -984,7 +984,11 @@ audio_io_handle_t AudioPolicyManager::getOutputForDevice(
                     ALOGI("getOutputForDevice() reusing direct output %d for session %d",
                         mOutputs.keyAt(i), session);
                     return mOutputs.keyAt(i);
+                } else if (session >= desc->mDirectClientSession) {
+                    // close direct output if currently open and configured with different parameters
+                    closeOutput(desc->mIoHandle);
                 }
+                break;
             }
         }
 
@@ -1093,7 +1097,10 @@ audio_io_handle_t AudioPolicyManager::selectOutput(const SortedVector<audio_io_h
             // if a valid format is specified, skip output if not compatible
             if (format != AUDIO_FORMAT_INVALID) {
                 if (outputDesc->mFlags & AUDIO_OUTPUT_FLAG_DIRECT) {
-                    if (format != outputDesc->mFormat) {
+                    bool invalid = (format != outputDesc->mFormat)
+                        || ((flags & AUDIO_OUTPUT_FLAG_FAST) != 0)
+                        || ((flags & AUDIO_OUTPUT_FLAG_DIRECT) == 0);/*lint !e655*/
+                    if (invalid) {
                         continue;
                     }
                 } else if (!audio_is_linear_pcm(format)) {
