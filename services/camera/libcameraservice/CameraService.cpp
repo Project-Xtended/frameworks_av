@@ -2541,7 +2541,7 @@ status_t CameraService::BasicClient::startCameraOps() {
     sCameraService->mUidPolicy->registerMonitorUid(mClientUid);
 
 #ifdef TARGET_NEEDS_CLIENT_INFO
-    std::ofstream cpf("/data/vendor/xtended/client_package_name");
+    std::ofstream cpf("/data/misc/xtended/client_package_name");
     std::string cpn = String8(mClientPackageName).string();
     cpf << cpn;
 #endif
