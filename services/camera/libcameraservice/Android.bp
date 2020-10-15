@@ -18,25 +18,11 @@
 
 cc_library_shared {
     name: "libcameraservice",
-
-    product_variables: {
-        xtended: {
-            target_camera_needs_client_info: {
-                cflags: ["-DTARGET_NEEDS_CLIENT_INFO"],
-            },
-            has_legacy_camera_hal1: {
-                cflags: ["-DNO_CAMERA_SERVER"],
-            },
-            uses_qti_camera_device: {
-                cppflags: ["-DQTI_CAMERA_DEVICE"],
-                shared_libs: ["vendor.qti.hardware.camera.device@1.0"],              
-            },
-            needs_camera_boottime_timestamp: {
-                cflags: ["-DTARGET_CAMERA_BOOTTIME_TIMESTAMP"],
-            },
-        },
-    },
-
+    defaults: [
+          "camera_needs_client_info",
+          "no_cameraserver_defaults",
+          "qti_camera_device_defaults"
+    ],
     // Camera service source
     srcs: [
         "CameraService.cpp",
