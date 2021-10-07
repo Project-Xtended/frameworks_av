@@ -1972,6 +1972,22 @@ status_t MediaCodec::requestIDRFrame() {
     return OK;
 }
 
+status_t MediaCodec::querySupportedVendorParameters(std::vector<std::string> *names) {
+    return mCodec->querySupportedParameters(names);
+}
+
+status_t MediaCodec::describeParameter(const std::string &name, CodecParameterDescriptor *desc) {
+    return mCodec->describeParameter(name, desc);
+}
+
+status_t MediaCodec::subscribeToVendorParameters(const std::vector<std::string> &names) {
+    return mCodec->subscribeToParameters(names);
+}
+
+status_t MediaCodec::unsubscribeFromVendorParameters(const std::vector<std::string> &names) {
+    return mCodec->unsubscribeFromParameters(names);
+}
+
 void MediaCodec::requestActivityNotification(const sp<AMessage> &notify) {
     sp<AMessage> msg = new AMessage(kWhatRequestActivityNotification, this);
     msg->setMessage("notify", notify);
@@ -2366,8 +2382,11 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                         mediametrics_setInt32(mMetricsHandle, kCodecSecure, 0);
                     }
 
-                    if (mIsVideo) {
-                        // audio codec is currently ignored.
+                    MediaCodecInfo::Attributes attr = mCodecInfo
+                            ? mCodecInfo->getAttributes()
+                            : MediaCodecInfo::Attributes(0);
+                    if (!(attr & MediaCodecInfo::kFlagIsSoftwareOnly)) {
+                        // software codec is currently ignored.
                         mResourceManagerProxy->addResource(
                                 MediaResource::CodecResource(mFlags & kFlagIsSecure, mIsVideo));
                     }

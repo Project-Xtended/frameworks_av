@@ -143,7 +143,8 @@ CCodecBufferChannel::CCodecBufferChannel(
       mFrameIndex(0u),
       mFirstValidFrameIndex(0u),
       mMetaMode(MODE_NONE),
-      mInputMetEos(false) {
+      mInputMetEos(false),
+      mSendEncryptedInfoBuffer(false) {
     mOutputSurface.lock()->maxDequeueBuffers = kSmoothnessFactor + kRenderingDepth;
     {
         Mutexed<Input>::Locked input(mInput);
@@ -188,7 +189,10 @@ status_t CCodecBufferChannel::signalEndOfInputStream() {
     return mInputSurface->signalEndOfInputStream();
 }
 
-status_t CCodecBufferChannel::queueInputBufferInternal(sp<MediaCodecBuffer> buffer) {
+status_t CCodecBufferChannel::queueInputBufferInternal(
+        sp<MediaCodecBuffer> buffer,
+        std::shared_ptr<C2LinearBlock> encryptedBlock,
+        size_t blockSize) {
     int64_t timeUs;
     CHECK(buffer->meta()->findInt64("timeUs", &timeUs));
 
@@ -209,6 +213,7 @@ status_t CCodecBufferChannel::queueInputBufferInternal(sp<MediaCodecBuffer> buff
         flags |= C2FrameData::FLAG_CODEC_CONFIG;
     }
     ALOGV("[%s] queueInputBuffer: buffer->size() = %zu", mName, buffer->size());
+    std::list<std::unique_ptr<C2Work>> items;
     std::unique_ptr<C2Work> work(new C2Work);
     work->input.ordinal.timestamp = timeUs;
     work->input.ordinal.frameIndex = mFrameIndex++;
@@ -218,9 +223,8 @@ status_t CCodecBufferChannel::queueInputBufferInternal(sp<MediaCodecBuffer> buff
     work->input.ordinal.customOrdinal = timeUs;
     work->input.buffers.clear();
 
-    uint64_t queuedFrameIndex = work->input.ordinal.frameIndex.peeku();
-    std::vector<std::shared_ptr<C2Buffer>> queuedBuffers;
     sp<Codec2Buffer> copy;
+    bool usesFrameReassembler = false;
 
     if (buffer->size() > 0u) {
         Mutexed<Input>::Locked input(mInput);
@@ -239,36 +243,50 @@ status_t CCodecBufferChannel::queueInputBufferInternal(sp<MediaCodecBuffer> buff
                 bool released = input->buffers->releaseBuffer(buffer, nullptr, true);
                 ALOGV("[%s] queueInputBuffer: buffer copied; %sreleased",
                       mName, released ? "" : "not ");
-                buffer.clear();
+                buffer = copy;
             } else {
                 ALOGW("[%s] queueInputBuffer: failed to copy a buffer; this may cause input "
                       "buffer starvation on component.", mName);
             }
         }
-        work->input.buffers.push_back(c2buffer);
-        queuedBuffers.push_back(c2buffer);
+        if (input->frameReassembler) {
+            usesFrameReassembler = true;
+            input->frameReassembler.process(buffer, &items);
+        } else {
+            work->input.buffers.push_back(c2buffer);
+            if (encryptedBlock) {
+                work->input.infoBuffers.emplace_back(C2InfoBuffer::CreateLinearBuffer(
+                        kParamIndexEncryptedBuffer,
+                        encryptedBlock->share(0, blockSize, C2Fence())));
+            }
+        }
     } else if (eos) {
+        Mutexed<Input>::Locked input(mInput);
+        if (input->frameReassembler) {
+            usesFrameReassembler = true;
+            // drain any pending items with eos
+            input->frameReassembler.process(buffer, &items);
+        }
         flags |= C2FrameData::FLAG_END_OF_STREAM;
     }
-    work->input.flags = (C2FrameData::flags_t)flags;
-    // TODO: fill info's
+    if (usesFrameReassembler) {
+        if (!items.empty()) {
+            items.front()->input.configUpdate = std::move(mParamsToBeSet);
+            mFrameIndex = (items.back()->input.ordinal.frameIndex + 1).peek();
+        }
+    } else {
+        work->input.flags = (C2FrameData::flags_t)flags;
+        // TODO: fill info's
 
-    work->input.configUpdate = std::move(mParamsToBeSet);
-    work->worklets.clear();
-    work->worklets.emplace_back(new C2Worklet);
+        work->input.configUpdate = std::move(mParamsToBeSet);
+        work->worklets.clear();
+        work->worklets.emplace_back(new C2Worklet);
 
-    std::list<std::unique_ptr<C2Work>> items;
-    items.push_back(std::move(work));
-    mPipelineWatcher.lock()->onWorkQueued(
-            queuedFrameIndex,
-            std::move(queuedBuffers),
-            PipelineWatcher::Clock::now());
-    c2_status_t err = mComponent->queue(&items);
-    if (err != C2_OK) {
-        mPipelineWatcher.lock()->onWorkDone(queuedFrameIndex);
+        items.push_back(std::move(work));
+
+        eos = eos && buffer->size() > 0u;
     }
-
-    if (err == C2_OK && eos && buffer->size() > 0u) {
+    if (eos) {
         work.reset(new C2Work);
         work->input.ordinal.timestamp = timeUs;
         work->input.ordinal.frameIndex = mFrameIndex++;
@@ -277,29 +295,34 @@ status_t CCodecBufferChannel::queueInputBufferInternal(sp<MediaCodecBuffer> buff
         work->input.buffers.clear();
         work->input.flags = C2FrameData::FLAG_END_OF_STREAM;
         work->worklets.emplace_back(new C2Worklet);
-
-        queuedFrameIndex = work->input.ordinal.frameIndex.peeku();
-        queuedBuffers.clear();
-
-        items.clear();
         items.push_back(std::move(work));
-
-        mPipelineWatcher.lock()->onWorkQueued(
-                queuedFrameIndex,
-                std::move(queuedBuffers),
-                PipelineWatcher::Clock::now());
-        err = mComponent->queue(&items);
-        if (err != C2_OK) {
-            mPipelineWatcher.lock()->onWorkDone(queuedFrameIndex);
-        }
     }
-    if (err == C2_OK) {
+    c2_status_t err = C2_OK;
+    if (!items.empty()) {
+        {
+            Mutexed<PipelineWatcher>::Locked watcher(mPipelineWatcher);
+            PipelineWatcher::Clock::time_point now = PipelineWatcher::Clock::now();
+            for (const std::unique_ptr<C2Work> &work : items) {
+                watcher->onWorkQueued(
+                        work->input.ordinal.frameIndex.peeku(),
+                        std::vector(work->input.buffers),
+                        now);
+            }
+        }
+        err = mComponent->queue(&items);
+    }
+    if (err != C2_OK) {
+        Mutexed<PipelineWatcher>::Locked watcher(mPipelineWatcher);
+        for (const std::unique_ptr<C2Work> &work : items) {
+            watcher->onWorkDone(work->input.ordinal.frameIndex.peeku());
+        }
+    } else {
         Mutexed<Input>::Locked input(mInput);
         bool released = false;
-        if (buffer) {
-            released = input->buffers->releaseBuffer(buffer, nullptr, true);
-        } else if (copy) {
+        if (copy) {
             released = input->extraBuffers.releaseSlot(copy, nullptr, true);
+        } else if (buffer) {
+            released = input->buffers->releaseBuffer(buffer, nullptr, true);
         }
         ALOGV("[%s] queueInputBuffer: buffer%s %sreleased",
               mName, (buffer == nullptr) ? "(copy)" : "", released ? "" : "not ");
@@ -514,6 +537,40 @@ status_t CCodecBufferChannel::queueSecureInputBuffer(
     }
     sp<EncryptedLinearBlockBuffer> encryptedBuffer((EncryptedLinearBlockBuffer *)buffer.get());
 
+    std::shared_ptr<C2LinearBlock> block;
+    size_t allocSize = buffer->size();
+    size_t bufferSize = 0;
+    c2_status_t blockRes = C2_OK;
+    bool copied = false;
+    if (mSendEncryptedInfoBuffer) {
+        static const C2MemoryUsage kDefaultReadWriteUsage{
+            C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE};
+        constexpr int kAllocGranule0 = 1024 * 64;
+        constexpr int kAllocGranule1 = 1024 * 1024;
+        std::shared_ptr<C2BlockPool> pool = mBlockPools.lock()->inputPool;
+        // round up encrypted sizes to limit fragmentation and encourage buffer reuse
+        if (allocSize <= kAllocGranule1) {
+            bufferSize = align(allocSize, kAllocGranule0);
+        } else {
+            bufferSize = align(allocSize, kAllocGranule1);
+        }
+        blockRes = pool->fetchLinearBlock(
+                bufferSize, kDefaultReadWriteUsage, &block);
+
+        if (blockRes == C2_OK) {
+            C2WriteView view = block->map().get();
+            if (view.error() == C2_OK && view.size() == bufferSize) {
+                copied = true;
+                // TODO: only copy clear sections
+                memcpy(view.data(), buffer->data(), allocSize);
+            }
+        }
+    }
+
+    if (!copied) {
+        block.reset();
+    }
+    
     ssize_t result = -1;
     ssize_t codecDataOffset = 0;
     if (numSubSamples == 1
@@ -605,7 +662,8 @@ status_t CCodecBufferChannel::queueSecureInputBuffer(
     }
 
     buffer->setRange(codecDataOffset, result - codecDataOffset);
-    return queueInputBufferInternal(buffer);
+    
+    return queueInputBufferInternal(buffer, block, bufferSize);
 }
 
 void CCodecBufferChannel::feedInputBufferIfAvailable() {
@@ -816,6 +874,9 @@ status_t CCodecBufferChannel::renderOutputBuffer(
     status_t result = mComponent->queueToOutputSurface(block, qbi, &qbo);
     if (result != OK) {
         ALOGI("[%s] queueBuffer failed: %d", mName, result);
+        if (result == NO_INIT) {
+            mCCodecCallback->onError(UNKNOWN_ERROR, ACTION_CODE_FATAL);
+        }
         return result;
     }
     ALOGV("[%s] queue buffer successful", mName);
@@ -879,27 +940,31 @@ status_t CCodecBufferChannel::start(
         bool buffersBoundToCodec) {
     C2StreamBufferTypeSetting::input iStreamFormat(0u);
     C2StreamBufferTypeSetting::output oStreamFormat(0u);
+    C2ComponentKindSetting kind;
     C2PortReorderBufferDepthTuning::output reorderDepth;
     C2PortReorderKeySetting::output reorderKey;
     C2PortActualDelayTuning::input inputDelay(0);
     C2PortActualDelayTuning::output outputDelay(0);
     C2ActualPipelineDelayTuning pipelineDelay(0);
+    C2SecureModeTuning secureMode(C2Config::SM_UNPROTECTED);
 
     c2_status_t err = mComponent->query(
             {
                 &iStreamFormat,
                 &oStreamFormat,
+                &kind,
                 &reorderDepth,
                 &reorderKey,
                 &inputDelay,
                 &pipelineDelay,
                 &outputDelay,
+                &secureMode,
             },
             {},
             C2_DONT_BLOCK,
             nullptr);
     if (err == C2_BAD_INDEX) {
-        if (!iStreamFormat || !oStreamFormat) {
+        if (!iStreamFormat || !oStreamFormat || !kind) {
             return UNKNOWN_ERROR;
         }
     } else if (err != C2_OK) {
@@ -916,18 +981,26 @@ status_t CCodecBufferChannel::start(
     // TODO: get this from input format
     bool secure = mComponent->getName().find(".secure") != std::string::npos;
 
+   // secure mode is a static parameter (shall not change in the executing state)
+    mSendEncryptedInfoBuffer = secureMode.value == C2Config::SM_READ_PROTECTED_WITH_ENCRYPTED;
+    
     std::shared_ptr<C2AllocatorStore> allocatorStore = GetCodec2PlatformAllocatorStore();
     int poolMask = GetCodec2PoolMask();
     C2PlatformAllocatorStore::id_t preferredLinearId = GetPreferredLinearAllocatorId(poolMask);
 
     if (inputFormat != nullptr) {
         bool graphic = (iStreamFormat.value == C2BufferData::GRAPHIC);
+        bool audioEncoder = !graphic && (kind.value == C2Component::KIND_ENCODER);
         C2Config::api_feature_t apiFeatures = C2Config::api_feature_t(
                 API_REFLECTION |
                 API_VALUES |
                 API_CURRENT_VALUES |
                 API_DEPENDENCY |
                 API_SAME_INPUT_BUFFER);
+        C2StreamAudioFrameSizeInfo::input encoderFrameSize(0u);
+        C2StreamSampleRateInfo::input sampleRate(0u);
+        C2StreamChannelCountInfo::input channelCount(0u);
+        C2StreamPcmEncodingInfo::input pcmEncoding(0u);
         std::shared_ptr<C2BlockPool> pool;
         {
             Mutexed<BlockPools>::Locked pools(mBlockPools);
@@ -940,7 +1013,19 @@ status_t CCodecBufferChannel::start(
             // from component, create the input block pool with given ID. Otherwise, use default IDs.
             std::vector<std::unique_ptr<C2Param>> params;
             C2ApiFeaturesSetting featuresSetting{apiFeatures};
-            err = mComponent->query({ &featuresSetting },
+            std::vector<C2Param *> stackParams({&featuresSetting});
+            if (audioEncoder) {
+                stackParams.push_back(&encoderFrameSize);
+                stackParams.push_back(&sampleRate);
+                stackParams.push_back(&channelCount);
+                stackParams.push_back(&pcmEncoding);
+            } else {
+                encoderFrameSize.invalidate();
+                sampleRate.invalidate();
+                channelCount.invalidate();
+                pcmEncoding.invalidate();
+            }
+            err = mComponent->query(stackParams,
                                     { C2PortAllocatorsTuning::input::PARAM_TYPE },
                                     C2_DONT_BLOCK,
                                     &params);
@@ -998,10 +1083,21 @@ status_t CCodecBufferChannel::start(
         input->numSlots = numInputSlots;
         input->extraBuffers.flush();
         input->numExtraSlots = 0u;
+        if (audioEncoder && encoderFrameSize && sampleRate && channelCount) {
+            input->frameReassembler.init(
+                    pool,
+                    {C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE},
+                    encoderFrameSize.value,
+                    sampleRate.value,
+                    channelCount.value,
+                    pcmEncoding ? pcmEncoding.value : C2Config::PCM_16);
+        }
         bool conforming = (apiFeatures & API_SAME_INPUT_BUFFER);
         // For encrypted content, framework decrypts source buffer (ashmem) into
         // C2Buffers. Thus non-conforming codecs can process these.
-        if (!buffersBoundToCodec && (hasCryptoOrDescrambler() || conforming)) {
+        if (!buffersBoundToCodec
+                && !input->frameReassembler
+                && (hasCryptoOrDescrambler() || conforming)) {
             input->buffers.reset(new SlotInputBuffers(mName));
         } else if (graphic) {
             if (mInputSurface) {

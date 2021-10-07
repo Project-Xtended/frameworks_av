@@ -3263,10 +3263,12 @@ status_t ACodec::configureTunneledVideoPlayback(
     if (err != OK) {
         ALOGE("native_window_set_sideband_stream(%p) failed! (err %d).",
                 sidebandHandle, err);
-        return err;
     }
 
-    return OK;
+    native_handle_close(sidebandHandle);
+    native_handle_delete(sidebandHandle);
+
+    return err;
 }
 
 status_t ACodec::setVideoPortFormatType(
@@ -5366,6 +5368,7 @@ status_t ACodec::getPortFormat(OMX_U32 portIndex, sp<AMessage> &notify) {
                     notify->setInt32("channel-count", params.nChannels);
                     notify->setInt32("sample-rate", params.nSampleRate);
                     notify->setInt32("bitrate", params.nBitRate);
+                    notify->setInt32("aac-profile", params.eAACProfile);
                     break;
                 }
 
@@ -9087,6 +9090,21 @@ status_t ACodec::getOMXChannelMapping(size_t numChannels, OMX_AUDIO_CHANNELTYPE 
             return -EINVAL;
     }
 
+    return OK;
+}
+
+status_t ACodec::querySupportedParameters(std::vector<std::string> *names) {
+    if (!names) {
+        return BAD_VALUE;
+    }
+    return OK;
+}
+
+status_t ACodec::subscribeToParameters([[maybe_unused]] const std::vector<std::string> &names) {
+    return OK;
+}
+
+status_t ACodec::unsubscribeFromParameters([[maybe_unused]] const std::vector<std::string> &names) {
     return OK;
 }
 
