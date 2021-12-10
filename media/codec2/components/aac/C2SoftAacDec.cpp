@@ -487,6 +487,7 @@ void C2SoftAacDec::drainRingBuffer(
         int available = outputDelayRingBufferSamplesAvailable();
         int numFrames = outInfo.decodedSizes.size();
         int numSamples = numFrames * (mStreamInfo->frameSize * mStreamInfo->numChannels);
+
         if (available < numSamples) {
             if (eos) {
                 numSamples = available;
@@ -494,6 +495,9 @@ void C2SoftAacDec::drainRingBuffer(
                 break;
             }
         }
+        else
+            numSamples = available;
+
         ALOGV("%d samples available (%d), or %d frames",
                 numSamples, available, numFrames);
         ALOGV("getting %d from ringbuffer", numSamples);
