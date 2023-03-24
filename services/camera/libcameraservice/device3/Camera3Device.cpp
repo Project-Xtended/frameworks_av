@@ -2177,10 +2177,20 @@ sp<Camera3Device::CaptureRequest> Camera3Device::createCaptureRequest(
         }
 
         if (stream->isConfiguring()) {
-            SET_ERR_L("%s: stream %d is not configured!", __FUNCTION__, stream->getId());
-            return NULL;
+            bool streamReConfigured = false;
+            status_t res = stream->finishConfiguration(&streamReConfigured);
+            if (res != OK) {
+                CLOGE("Can't finish configuring output stream %d: %s (%d)",
+                        stream->getId(), strerror(-res), res);
+                cancelStreamsConfigurationLocked();
+                return NULL;
+            }
+
+            if (streamReConfigured) {
+                mInterface->onStreamReConfigured(stream->getId());
+            }
         }
-        // Check if stream prepare is blocking requests.
+
         if (stream->isBlockedByPrepare()) {
             CLOGE("Request references an output stream that's being prepared!");
             return NULL;
@@ -2546,26 +2556,6 @@ status_t Camera3Device::configureStreamsLocked(int operatingMode,
         }
         if (streamReConfigured) {
             mInterface->onStreamReConfigured(mInputStream->getId());
-        }
-    }
-
-    for (size_t i = 0; i < mOutputStreams.size(); i++) {
-        sp<Camera3OutputStreamInterface> outputStream = mOutputStreams[i];
-        if (outputStream->isConfiguring() && !outputStream->isConsumerConfigurationDeferred()) {
-            bool streamReConfigured = false;
-            res = outputStream->finishConfiguration(&streamReConfigured);
-            if (res != OK) {
-                CLOGE("Can't finish configuring output stream %d: %s (%d)",
-                        outputStream->getId(), strerror(-res), res);
-                cancelStreamsConfigurationLocked();
-                if ((res == NO_INIT || res == DEAD_OBJECT) && outputStream->isAbandoned()) {
-                    return DEAD_OBJECT;
-                }
-                return BAD_VALUE;
-            }
-            if (streamReConfigured) {
-                mInterface->onStreamReConfigured(outputStream->getId());
-            }
         }
     }
 
